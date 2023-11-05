@@ -12,5 +12,16 @@ target_link_libraries(
   GTest::gtest_main
 )
 
+add_executable(
+  packed_atomic_test
+  packed_atomic_test.cc
+)
+target_link_libraries(
+  packed_atomic_test
+  packed-atomic
+  GTest::gmock
+  GTest::gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(queue_test)
