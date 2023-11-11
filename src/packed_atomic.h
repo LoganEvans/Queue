@@ -5,116 +5,23 @@
 #include <utility>
 #include <variant>
 
-// struct Tag {
-//   static_assert((kBufferSize & (kBufferSize - 1)) == 0, "");
-//
-//   // An kIncrement value of
-//   //   kIncrement = 1 + hardware_destructive_interference_size / sizeof(T)
-//   // would make it so that adjacent values will always be on separate cache
-//   // lines. However, benchmarks don't show that this attempt to avoiding
-//   // false sharing helps.
-//   static constexpr uint64_t kIncrement = 1;
-//   // static constexpr uint64_t kIncrement =
-//   //     1 + hardware_destructive_interference_size / sizeof(T);
-//   static constexpr uint64_t kBufferWrapDelta = kBufferSize * kIncrement;
-//   static constexpr uint64_t kBufferSizeMask = kBufferSize - 1;
-//   static constexpr uint64_t kConsumerFlag = (1ULL << 63);
-//   static constexpr uint64_t kWaitingFlag = (1ULL << 62);
-//
-//   uint64_t raw;
-//
-//   Tag(uint64_t raw) : raw(raw) {}
-//   Tag() : Tag(0) {}
-//
-//   Tag& operator++() {
-//     raw += kIncrement;
-//     return *this;
-//   }
-//
-//   Tag& operator++(int) {
-//     raw += kIncrement;
-//     return *this;
-//   }
-//
-//   Tag& operator--() {
-//     raw -= kIncrement;
-//     return *this;
-//   }
-//
-//   Tag& operator--(int) {
-//     raw -= kIncrement;
-//     return *this;
-//   }
-//
-//   auto operator<=>(const Tag&) const = default;
-//
-//   std::string DebugString() const {
-//     return "Tag<" + std::string(is_producer() ? "P" : "C")
-//          + (is_waiting() ? std::string("|W") : "") + ">{"
-//          + std::to_string(value()) + "@" + std::to_string(to_index()) + "}";
-//   }
-//
-//   uint64_t value() const { return (raw << 2) >> 2; }
-//
-//   Tag prev_paired_tag() const {
-//     if (is_consumer()) {
-//       return Tag{(raw ^ kConsumerFlag) & ~kWaitingFlag};
-//     } else {
-//       return Tag{((raw - kBufferWrapDelta) ^ kConsumerFlag) & ~kWaitingFlag};
-//     }
-//   }
-//
-//   bool is_paired(Tag observed_tag) const {
-//     return prev_paired_tag().raw == (observed_tag.raw & ~kWaitingFlag);
-//   }
-//
-//   bool is_producer() const { return (raw & kConsumerFlag) == 0; }
-//
-//   void mark_as_producer() { raw &= ~kConsumerFlag; }
-//
-//   bool is_consumer() const { return (raw & kConsumerFlag) > 0; }
-//
-//   void mark_as_consumer() { raw |= kConsumerFlag; }
-//
-//   void mark_as_waiting() { raw |= kWaitingFlag; }
-//
-//   bool is_waiting() const { return (raw & kWaitingFlag) > 0; }
-//
-//   void clear_waiting_flag() { raw &= ~kWaitingFlag; }
-//
-//   int to_index() const { return raw & kBufferSizeMask; }
-// };
-//   static_assert(sizeof(Tag) == sizeof(uint64_t), "");
-//
-//
-// union Index {
-//   struct {
-//     Tag tag;
-//   };
-//   struct {
-//     std::atomic<Tag> tag_atomic;
-//   };
-//   struct {
-//     std::atomic<uint64_t> tag_raw_atomic;
-//   };
-//
-//   Index(Tag tag) : tag(tag) {}
-//   Index() : Index(/*tag=*/0) {}
-//
-//   std::string DebugString() const {
-//     return "Index{tag=" + tag.DebugString() + "}";
-//   }
-// };
-// static_assert(sizeof(Index) == sizeof(Tag), "");
+namespace theta {
 
 template <typename... Types>
-struct PackedAtomic {
-  template <size_t index>
+class PackedAtomic {
+ public:
+  template <int index>
+  using ResultType =
+      typename std::tuple_element<index, std::tuple<Types...>>::type;
+
+  static constexpr size_t kNumTypes
+      = std::tuple_size<std::tuple<Types...>>::value;
+
+ private:
+  template <int index>
   static constexpr size_t offset() {
-    using prev_type =
-        typename std::tuple_element<index - 1, std::tuple<Types...>>::type;
-    using curr_type =
-        typename std::tuple_element<index, std::tuple<Types...>>::type;
+    using prev_type = ResultType<index - 1>;
+    using curr_type = ResultType<index>;
 
     constexpr size_t prev_end = offset<index - 1>() + sizeof(prev_type);
     constexpr size_t remainder = prev_end % sizeof(curr_type);
@@ -131,12 +38,8 @@ struct PackedAtomic {
   }
 
   static constexpr size_t bytes() {
-    constexpr size_t num_types = std::tuple_size<std::tuple<Types...>>::value;
-
     constexpr size_t min_bytes
-        = offset<std::tuple_size<std::tuple<Types...>>::value - 1>()
-        + sizeof(typename std::tuple_element<num_types - 1,
-                                             std::tuple<Types...>>::type);
+        = offset<kNumTypes - 1>() + sizeof(ResultType<kNumTypes - 1>);
 
     if constexpr (min_bytes <= 1) {
       return 1;
@@ -155,30 +58,119 @@ struct PackedAtomic {
     return min_bytes;
   }
 
-  using possible_containing_types = std::variant<std::atomic<int8_t>,
-               std::atomic<int16_t>,
-               std::atomic<int32_t>,
-               std::atomic<int64_t>,
-               std::atomic<__int128_t>>;
+  using possible_containing_types
+      = std::variant<int8_t, int16_t, int32_t, int64_t, __int128_t>;
 
   static constexpr int containing_types_index() {
-    constexpr auto b = PackedAtomic<Types...>::bytes();
-    if constexpr (b == 1) {
+    if constexpr (bytes() == 1) {
       return 0;
-    } else if constexpr (b == 2) {
+    } else if constexpr (bytes() == 2) {
       return 1;
-    } else if constexpr (b == 4) {
+    } else if constexpr (bytes() == 4) {
       return 2;
-    } else if constexpr (b == 8) {
+    } else if constexpr (bytes() == 8) {
       return 3;
     }
     return 4;
   }
 
+  template <typename FirstType, typename... RestTypes>
+  void variadic_ctor_helper(FirstType firstArg, RestTypes... restArgs) {
+    constexpr size_t numRestTypes
+        = std::tuple_size<std::tuple<RestTypes...>>::value;
+    constexpr size_t index = kNumTypes - numRestTypes - 1;
+    set<index>(firstArg);
+    variadic_ctor_helper(restArgs...);
+  }
+
+  void variadic_ctor_helper() {}
+
+ public:
   using ContainingType = typename std::variant_alternative<
       PackedAtomic<Types...>::containing_types_index(),
       possible_containing_types>::type;
 
-  ContainingType container{0};
+  PackedAtomic() : container_(0) {}
+
+  PackedAtomic(Types... args) { variadic_ctor_helper(args...); }
+
+  template <typename... Types2>
+  PackedAtomic(const PackedAtomic<Types2...>& other)
+      : container_(other.container_) {}
+
+  template <typename... Types2>
+  PackedAtomic(const PackedAtomic<Types2...>& other,
+               std::memory_order mem_order) {
+    other.fetch(mem_order);
+    container_ = other.container_;
+  }
+
+  template <typename... Types2>
+  PackedAtomic<Types2...> operator=(const PackedAtomic<Types2...>& other) {
+    container_ = other.container_;
+    return *this;
+  }
+
+  template <int index>
+  auto get() const {
+    ResultType<index> result;
+    memcpy(&result, as_nonatomic<index>(), sizeof(ResultType<index>));
+    return result;
+  }
+
+  template <int index>
+  ResultType<index>* as_nonatomic() const {
+    return reinterpret_cast<ResultType<index>*>(
+        reinterpret_cast<char*>(const_cast<ContainingType*>(&container_))
+        + PackedAtomic<Types...>::offset<index>());
+  }
+
+  template <int index>
+  std::atomic<ResultType<index>>* as_atomic() const {
+    return reinterpret_cast<std::atomic<ResultType<index>>*>(
+        reinterpret_cast<char*>(const_cast<ContainingType*>(&container_))
+        + PackedAtomic<Types...>::offset<index>());
+  }
+
+  ContainingType container() const { return container_; }
+
+  std::atomic<ContainingType>* container_as_atomic() {
+    return reinterpret_cast<std::atomic<ContainingType>*>(&container_);
+  }
+
+  template <int index>
+  auto get_atomic(std::memory_order mem_order
+                  = std::memory_order::acquire) const {
+    return as_atomic<index>()->load(mem_order);
+  }
+
+  template <int index>
+  void set(ResultType<index> value) {
+    memcpy(as_nonatomic<index>(), &value, sizeof(value));
+  }
+
+  template <int index>
+  void set_atomic(ResultType<index> value,
+                  std::memory_order mem_order = std::memory_order::release) {
+    as_atomic<index>()->store(value, mem_order);
+  }
+
+  template <int index>
+  ResultType<index> fetch_add(ResultType<index> val,
+                              std::memory_order mem_order
+                              = std::memory_order::acq_rel) {
+    return as_atomic<index>()->fetch_add(mem_order);
+  }
+
+  void fetch(std::memory_order mem_order = std::memory_order::acquire) {
+    container_ = container_as_atomic()->load(mem_order);
+  }
+
+  void flush(std::memory_order mem_order = std::memory_order::release) {
+    container_as_atomic()->store(container_, mem_order);
+  }
+
+  alignas(sizeof(ContainingType)) ContainingType container_{0};
 };
 
+}  // namespace theta

@@ -2,6 +2,7 @@
 
 #include "defs.h"
 
+namespace theta {
 class QueueOpts {
  public:
   size_t max_size() const { return max_size_; }
@@ -13,4 +14,4 @@ class QueueOpts {
  private:
   size_t max_size_{hardware_destructive_interference_size};
 };
-
+}  // namespace theta

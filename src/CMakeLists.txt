@@ -6,6 +6,12 @@ target_include_directories(packed-atomic INTERFACE .)
 target_link_libraries(packed-atomic INTERFACE atomic)
 
 add_library(
+  types INTERFACE
+  types.h
+)
+target_include_directories(types INTERFACE .)
+
+add_library(
   mpmc-queue INTERFACE
   mpmc_queue.h
 )
