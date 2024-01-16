@@ -90,6 +90,8 @@ class PackedAtomic {
       PackedAtomic<Types...>::containing_types_index(),
       possible_containing_types>::type;
 
+  using AtomicContainingType = std::atomic<ContainingType>;
+
   PackedAtomic() : container_(0) {}
 
   PackedAtomic(Types... args) { variadic_ctor_helper(args...); }
@@ -134,7 +136,7 @@ class PackedAtomic {
 
   ContainingType container() const { return container_; }
 
-  std::atomic<ContainingType>* container_as_atomic() {
+  AtomicContainingType* container_as_atomic() {
     return reinterpret_cast<std::atomic<ContainingType>*>(&container_);
   }
 

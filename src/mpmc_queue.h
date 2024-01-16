@@ -19,15 +19,15 @@ class MPMCQueue {
   union Data {
     struct {
       T value;
-      Tag tag;
+      Tag<kBufferSize> tag;
     };
     struct {
       std::atomic<T> value_atomic;
-      std::atomic<Tag> tag_atomic;
+      std::atomic<Tag<kBufferSize>> tag_atomic;
     };
     std::atomic<__int128> line;
 
-    Data(T value, Tag tag) : value(value), tag(tag) {}
+    Data(T value, Tag<kBufferSize> tag) : value(value), tag(tag) {}
     Data(__int128 line) : line(line) {}
     Data() : Data(/*line=*/0) {}
     Data(const Data& other)
@@ -48,10 +48,10 @@ class MPMCQueue {
 
  public:
   MPMCQueue()
-      : head_(Tag::kBufferWrapDelta)
-      , tail_(Tag::kBufferWrapDelta)
+      : head_(Tag<kBufferSize>::kBufferWrapDelta)
+      , tail_(Tag<kBufferSize>::kBufferWrapDelta)
       , buffer_(kBufferSize) {
-    Tag tag;
+    Tag<kBufferSize> tag;
     tag.mark_as_consumer();
     for (size_t i = 0; i < buffer_.size(); i++) {
       buffer_[tag.to_index()].tag = tag;
@@ -71,81 +71,58 @@ class MPMCQueue {
   }
 
   void push(T val) {
-    Tag tail{tail_.container_as_atomic()->fetch_add(
-        Tag::kIncrement, std::memory_order::acq_rel)};
+    Tag tail{tail_.reserve()};
+    tail.mark_as_producer();
     do_push(std::move(val), tail);
   }
 
   bool try_push(T val) {
-    const Tag head{head_.container_as_atomic()->load(std::memory_order::acquire)};
-
-    Tag expected_tail{head};
-    Tag desired_tail{expected_tail};
-    desired_tail++;
-
-    while (
-        !tail_.container_as_atomic().compare_exchange_weak(expected_tail,
-                                                 desired_tail,
-                                                 std::memory_order::release,
-                                                 std::memory_order::relaxed)) {
-      desired_tail = expected_tail;
-      desired_tail++;
-      if (desired_tail.raw >= head.raw + Tag::kBufferWrapDelta) {
-        return false;
-      }
+    auto maybe_tail
+        = tail_.try_reserve(/*max_allowed_value=*/head_.value_atomic());
+    if (!maybe_tail.has_value()) {
+      return false;
     }
-
-    do_push(std::move(val), expected_tail);
+    auto tail = maybe_tail.value();
+    tail.mark_as_producer();
+    do_push(std::move(val), tail);
     return true;
   }
 
   T pop() {
-    Tag tag{/*raw=*/head_.container_as_atomic()->fetch_add(Tag::kIncrement,
-                                                 std::memory_order::acq_rel)};
-    tag.mark_as_consumer();
-    return do_pop(tag);
+    Tag head{head_.reserve()};
+    head.mark_as_consumer();
+    return do_pop(head);
   }
 
   std::optional<T> try_pop() {
-    const Tag tail{tail_.container_as_atomic()->load(std::memory_order::acquire)};
-
-    Tag desired_head{tail.raw};
-    Tag expected_head{desired_head.raw - Tag::kIncrement};
-
-    while (
-        !head_.container_as_atomic()->compare_exchange_weak(expected_head,
-                                                  desired_head,
-                                                  std::memory_order::release,
-                                                  std::memory_order::relaxed)) {
-      desired_head = expected_head;
-      desired_head++;
-      if (desired_head > tail) {
-        return {};
-      }
+    auto maybe_head
+        = tail_.try_reserve(/*max_allowed_value=*/head_.value_atomic() - 1);
+    if (!maybe_head.has_value()) {
+      return {};
     }
-
-    expected_head.mark_as_consumer();
-    return do_pop(expected_head);
+    auto head = maybe_head.value();
+    head.mark_as_producer();
+    return {do_pop(head)};
   }
 
   size_t size() const {
     // Reading head before tail will make it possible to "see" more elements in
     // the queue than it can hold, but this makes it so that the size will
     // never be negative.
-    auto head = head_.container_as_atomic()->load(std::memory_order::acquire);
-    auto tail = tail_.container_as_atomic()->load(std::memory_order::acquire);
+    auto head = head_.value_atomic();
+    auto tail = tail_.value_atomic();
 
-    return (tail.raw - head.raw) / Tag::kIncrement;
+    return (head - tail) / Tag<kBufferSize>::kIncrement;
   }
 
   static constexpr size_t capacity() { return kBufferSize; }
 
  private:
-  alignas(hardware_destructive_interference_size) Tag head_;
-  alignas(hardware_destructive_interference_size) Tag tail_;
+  alignas(hardware_destructive_interference_size) Tag<kBufferSize> head_;
+  alignas(hardware_destructive_interference_size) Tag<kBufferSize> tail_;
   alignas(hardware_destructive_interference_size) std::vector<Data> buffer_;
 
-  void do_push(T val, const Tag& tag) {
+  void do_push(T val, const Tag<kBufferSize>& tag) {
     assert(tag.is_producer());
     assert(!tag.is_waiting());
 
@@ -176,7 +153,7 @@ class MPMCQueue {
     }
   }
 
-  T do_pop(const Tag& tag) {
+  T do_pop(const Tag<kBufferSize>& tag) {
     assert(tag.is_consumer());
     assert(!tag.is_waiting());
 
@@ -208,12 +185,13 @@ class MPMCQueue {
     return observed_data.value;
   }
 
-  void wait_for_data(const Tag& claimed_tag, Tag observed_tag) {
+  void wait_for_data(const Tag<kBufferSize>& claimed_tag,
+                     Tag<kBufferSize> observed_tag) {
     int idx = claimed_tag.to_index();
     while (true) {
-      Tag want_tag{observed_tag};
+      Tag<kBufferSize> want_tag{observed_tag};
       want_tag.mark_as_waiting();
-      if ((observed_tag == want_tag)
+      if ((observed_tag.value() == want_tag.value())
           || buffer_[idx].tag_atomic.compare_exchange_weak(
               observed_tag,
               want_tag,
